@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate configuration
+        run: python -m json.tool mirror-config.json >/dev/null
+      - name: Compile Python
+        run: python -m py_compile scripts/mirror.py tests/test_mirror.py
+      - name: Run tests
+        run: python -m unittest discover --start-directory tests --verbose

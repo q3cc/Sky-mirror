@@ -1,0 +1,204 @@
+name: Mirror Sky from Google Play
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: Publish even when the latest manifest matches Google Play
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sky-google-play-mirror
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe Google Play
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.probe.outputs.should_release }}
+      release_tag: ${{ steps.probe.outputs.release_tag }}
+      release_title: ${{ steps.probe.outputs.release_title }}
+      skip_reason: ${{ steps.probe.outputs.skip_reason }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install downloader
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Download latest release manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p previous-release
+          if gh release view >/dev/null 2>&1; then
+            gh release download --pattern release-manifest.json --dir previous-release || true
+          fi
+
+      - name: Probe current version
+        id: probe
+        env:
+          GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+          GPLAYDL_EMAIL: ${{ secrets.GPLAYDL_EMAIL }}
+          FORCE_RELEASE: ${{ inputs.force_release || 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            probe
+            --config mirror-config.json
+            --previous previous-release/release-manifest.json
+            --output probe-manifest.json
+          )
+          if [[ "$FORCE_RELEASE" == "true" ]]; then
+            args+=(--force)
+          fi
+          python scripts/mirror.py "${args[@]}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sky-probe-manifest
+          path: probe-manifest.json
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Download and publish
+    needs: probe
+    if: needs.probe.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install downloader
+        run: python -m pip install --requirement requirements.txt
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sky-probe-manifest
+          path: dist/probe
+
+      - name: Download original Google Play files
+        env:
+          GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
+          GPLAYDL_EMAIL: ${{ secrets.GPLAYDL_EMAIL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(jq -r '.app.packageName' mirror-config.json)"
+          arch="$(jq -r '.download.architecture' mirror-config.json)"
+          args=(download "$package" --output dist/download --arch "$arch")
+          if [[ -n "${GPLAYDL_EMAIL:-}" ]]; then
+            args+=(--email "$GPLAYDL_EMAIL")
+          fi
+          if [[ "$(jq -r '.download.includeSplits' mirror-config.json)" != "true" ]]; then
+            args+=(--no-splits)
+          fi
+          if [[ "$(jq -r '.download.includeExtras' mirror-config.json)" != "true" ]]; then
+            args+=(--no-extras)
+          fi
+          if [[ "$(jq -r '.download.includeDexMetadata' mirror-config.json)" == "true" ]]; then
+            args+=(--dm)
+          fi
+          locales="$(jq -r '.download.locales | join(",")' mirror-config.json)"
+          if [[ -n "$locales" ]]; then
+            args+=(--locale "$locales")
+          fi
+          gplaydl "${args[@]}"
+
+      - name: Verify and prepare release
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/mirror.py finalize \
+            --config mirror-config.json \
+            --probe dist/probe/probe-manifest.json \
+            --input-dir dist/download \
+            --output-dir dist/release \
+            --repository "$GITHUB_REPOSITORY"
+
+      - name: Create or resume draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.release_title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file dist/release/release-notes.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --latest=false \
+              --title "$RELEASE_TITLE" \
+              --notes-file dist/release/release-notes.md
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(
+            find dist/release -maxdepth 1 -type f ! -name release-notes.md -print0
+          )
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release assets were prepared." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+
+      - name: Publish as latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.release_title }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" \
+            --draft=false \
+            --prerelease=false \
+            --latest \
+            --title "$RELEASE_TITLE" \
+            --notes-file dist/release/release-notes.md
+
+  unchanged:
+    name: Already current
+    needs: probe
+    if: needs.probe.outputs.should_release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ needs.probe.outputs.skip_reason }}"

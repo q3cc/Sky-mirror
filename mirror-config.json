@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "title": "Sky: Children of the Light",
+    "packageName": "com.tgc.sky.android",
+    "playUrl": "https://play.google.com/store/apps/details?id=com.tgc.sky.android"
+  },
+  "download": {
+    "architecture": "arm64",
+    "locales": [],
+    "includeSplits": true,
+    "includeExtras": true,
+    "includeDexMetadata": false
+  },
+  "release": {
+    "tagPrefix": "sky-android",
+    "bundleName": "sky-android-arm64.apks.zip",
+    "bundleMaxBytes": 1900000000,
+    "assetMaxBytes": 2147483647
+  }
+}
