@@ -7,14 +7,14 @@
 - 默认架构: `arm64`
 - 调度: 每 6 小时探测一次，也支持手动运行
 
-本仓库只保存自动化代码。APK、split APK、OBB 和 Play Asset Delivery 文件作为 GitHub Release Assets 发布，不进入 Git 历史。
+本仓库只保存自动化代码。APK、split APK、OBB 和 Play Asset Delivery 文件封装为分片 ZIP，通过 GitHub Release Assets 发布，不进入 Git 历史。
 
 ## 工作方式
 
 1. `probe` 使用 `gplaydl` 查询当前 `versionName` 和 `versionCode`。
 2. 将稳定版本字段与最新 Release 中的 `release-manifest.json` 比较。
 3. 没有变化时立即结束，不下载、不重复发版。
-4. 发现新版时，从 Google Play 下载 base APK、配置 split 和附加资产。
+4. 发现新版时，从 Google Play 下载 base APK、配置 split 和附加资产，封装为完整 ZIP。
 5. 校验探测版本与下载版本一致，生成 `SHA256SUMS.txt`、`release-manifest.json` 和 `download-index.json`。
 6. 先创建 Draft Release，所有资产上传成功后再发布为 Latest。
 
@@ -64,14 +64,28 @@ https://github.com/<owner>/Sky-mirror/releases/latest
 https://github.com/<owner>/Sky-mirror/releases/latest/download/download-index.json
 https://github.com/<owner>/Sky-mirror/releases/latest/download/SHA256SUMS.txt
 https://github.com/<owner>/Sky-mirror/releases/latest/download/release-manifest.json
-https://github.com/<owner>/Sky-mirror/releases/latest/download/sky-android-arm64.apks.zip
+https://github.com/<owner>/Sky-mirror/releases/latest/download/sky-android-arm64.zip.001
 ```
 
-`sky-android-arm64.apks.zip` 仅在完整文件集合小于 `1.9 GB` 时生成。GitHub 对单个 Release Asset 有 2 GiB 限制；Sky 体积过大时，工作流会改为逐个发布原始文件，并通过固定的 `download-index.json` 给出本版本全部下载链接。
+工作流始终生成 `sky-android-arm64.zip`；文件超过 1 GB 时自动切成 `.001`、`.002`、`.003` 等连续分片。`download-index.json` 会列出当前版本的全部分片链接。
+
+下载全部分片和还原脚本，在同一目录运行：
+
+```powershell
+.\rebuild-zip.ps1
+```
+
+Linux 或 Android Termux 可运行：
+
+```bash
+bash rebuild-zip.sh
+```
+
+脚本会生成 `sky-android-arm64.zip` 并自动核对完整 ZIP 的 SHA-256。
 
 ## 安装
 
-现代 Play 应用通常由 base APK 和多个 split APK 组成，base APK 不能单独安装。解压完整包后可使用：
+现代 Play 应用通常由 base APK 和多个 split APK 组成，base APK 不能单独安装。还原并解压 ZIP 后可使用：
 
 ```bash
 adb install-multiple packages/com.tgc.sky.android-*.apk

@@ -14,8 +14,8 @@
   },
   "release": {
     "tagPrefix": "sky-android",
-    "bundleName": "sky-android-arm64.apks.zip",
-    "bundleMaxBytes": 1900000000,
+    "bundleName": "sky-android-arm64.zip",
+    "bundlePartMaxBytes": 1000000000,
     "assetMaxBytes": 2147483647
   }
 }

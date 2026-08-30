@@ -15,7 +15,7 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(mirror)
 
 
-def config(bundle_limit: int = 1_900_000_000) -> dict:
+def config(part_limit: int = 1_000_000_000) -> dict:
     return {
         "schemaVersion": 1,
         "app": {
@@ -32,8 +32,8 @@ def config(bundle_limit: int = 1_900_000_000) -> dict:
         },
         "release": {
             "tagPrefix": "sky-android",
-            "bundleName": "sky-android-arm64.apks.zip",
-            "bundleMaxBytes": bundle_limit,
+            "bundleName": "sky-android-arm64.zip",
+            "bundlePartMaxBytes": part_limit,
             "assetMaxBytes": 2_147_483_647,
         },
     }
@@ -67,7 +67,7 @@ class MirrorTests(unittest.TestCase):
         tag = mirror.make_release_tag(config(), "0.30.0 beta / 1", 42)
         self.assertEqual(tag, "sky-android-0.30.0-beta-1-vc42")
 
-    def test_finalize_creates_manifest_checksums_index_and_bundle(self) -> None:
+    def test_finalize_creates_manifest_checksums_index_and_zip(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             input_dir = root / "input"
@@ -95,11 +95,23 @@ class MirrorTests(unittest.TestCase):
             manifest = json.loads((output_dir / "release-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["artifacts"]), 2)
             self.assertTrue(manifest["bundle"]["created"])
-            self.assertTrue((output_dir / "sky-android-arm64.apks.zip").is_file())
+            self.assertTrue(manifest["bundle"]["singleFile"])
+            zip_path = output_dir / "sky-android-arm64.zip"
+            self.assertTrue(zip_path.is_file())
+            with mirror.zipfile.ZipFile(zip_path) as archive:
+                self.assertEqual(
+                    set(archive.namelist()),
+                    {
+                        "INSTALL.txt",
+                        "packages/com.tgc.sky.android-77.apk",
+                        "packages/com.tgc.sky.android-77-config.arm64_v8a.apk",
+                    },
+                )
             self.assertTrue((output_dir / "download-index.json").is_file())
-            self.assertIn("com.tgc.sky.android-77.apk", (output_dir / "SHA256SUMS.txt").read_text())
+            self.assertIn("sky-android-arm64.zip", (output_dir / "SHA256SUMS.txt").read_text())
+            self.assertFalse((output_dir / "com.tgc.sky.android-77.apk").exists())
 
-    def test_finalize_skips_bundle_above_configured_limit(self) -> None:
+    def test_finalize_splits_zip_above_configured_limit_and_reassembles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             input_dir = root / "input"
@@ -107,8 +119,8 @@ class MirrorTests(unittest.TestCase):
             input_dir.mkdir()
             config_path = root / "config.json"
             probe_path = root / "probe.json"
-            config_path.write_text(json.dumps(config(bundle_limit=1)), encoding="utf-8")
-            probe = mirror.build_probe_manifest(config(bundle_limit=1), details(version_code=88))
+            config_path.write_text(json.dumps(config(part_limit=100)), encoding="utf-8")
+            probe = mirror.build_probe_manifest(config(part_limit=100), details(version_code=88))
             probe_path.write_text(json.dumps(probe), encoding="utf-8")
             (input_dir / "com.tgc.sky.android-88.apk").write_bytes(b"larger-than-one-byte")
 
@@ -122,8 +134,21 @@ class MirrorTests(unittest.TestCase):
                 )
             )
             manifest = json.loads((output_dir / "release-manifest.json").read_text(encoding="utf-8"))
-            self.assertFalse(manifest["bundle"]["created"])
-            self.assertFalse((output_dir / "sky-android-arm64.apks.zip").exists())
+            self.assertTrue(manifest["bundle"]["created"])
+            self.assertFalse(manifest["bundle"]["singleFile"])
+            self.assertFalse((output_dir / "sky-android-arm64.zip").exists())
+            self.assertGreater(len(manifest["bundle"]["parts"]), 1)
+            self.assertTrue(all(part["size"] <= 100 for part in manifest["bundle"]["parts"]))
+            rebuilt = b"".join(
+                (output_dir / part["name"]).read_bytes()
+                for part in manifest["bundle"]["parts"]
+            )
+            rebuilt_path = output_dir / "rebuilt.zip"
+            rebuilt_path.write_bytes(rebuilt)
+            with mirror.zipfile.ZipFile(rebuilt_path) as archive:
+                self.assertIn("packages/com.tgc.sky.android-88.apk", archive.namelist())
+            self.assertTrue((output_dir / "rebuild-zip.ps1").is_file())
+            self.assertTrue((output_dir / "rebuild-zip.sh").is_file())
 
     def test_finalize_rejects_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

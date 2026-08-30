@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -220,16 +219,10 @@ def release_url(repository: str, tag: str, name: str) -> str:
 
 
 def create_bundle(
-    files: list[Path], output: Path, max_bytes: int, package: str
+    files: list[Path], output: Path, part_max_bytes: int, package: str
 ) -> dict[str, Any]:
-    total_bytes = sum(path.stat().st_size for path in files)
-    if total_bytes > max_bytes:
-        return {
-            "created": False,
-            "reason": "source-files-exceed-bundle-limit",
-            "sourceBytes": total_bytes,
-            "limitBytes": max_bytes,
-        }
+    if part_max_bytes <= 0:
+        raise ValueError("release.bundlePartMaxBytes must be greater than zero")
     install_text = (
         "These are the original files delivered by Google Play.\n"
         "Do not install only the base APK when split APKs are present.\n\n"
@@ -241,15 +234,80 @@ def create_bundle(
         for path in files:
             archive.write(path, f"packages/{path.name}")
     size = output.stat().st_size
-    if size > max_bytes:
-        output.unlink()
+    checksum = sha256_file(output)
+    if size <= part_max_bytes:
         return {
-            "created": False,
-            "reason": "bundle-output-exceeds-limit",
-            "sourceBytes": total_bytes,
-            "limitBytes": max_bytes,
+            "created": True,
+            "singleFile": True,
+            "size": size,
+            "sha256": checksum,
+            "assets": [{"name": output.name, "size": size, "sha256": checksum}],
+            "parts": [],
         }
-    return {"created": True, "size": size, "sha256": sha256_file(output)}
+
+    parts: list[dict[str, Any]] = []
+    with output.open("rb") as source:
+        part_number = 1
+        while source.tell() < size:
+            part_path = output.with_name(f"{output.name}.{part_number:03d}")
+            digest = hashlib.sha256()
+            written = 0
+            with part_path.open("wb") as destination:
+                while written < part_max_bytes:
+                    chunk = source.read(min(8 * 1024 * 1024, part_max_bytes - written))
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    digest.update(chunk)
+                    written += len(chunk)
+            parts.append({"name": part_path.name, "size": written, "sha256": digest.hexdigest()})
+            part_number += 1
+    output.unlink()
+
+    powershell_path = output.parent / "rebuild-zip.ps1"
+    powershell_path.write_text(
+        f'param([string]$Output = "{output.name}")\n'
+        '$ErrorActionPreference = "Stop"\n'
+        f'$parts = Get-ChildItem -LiteralPath $PSScriptRoot -Filter "{output.name}.???" | Sort-Object Name\n'
+        'if ($parts.Count -eq 0) { throw "No ZIP parts found." }\n'
+        '$target = Join-Path $PSScriptRoot $Output\n'
+        '$writer = [IO.File]::Create($target)\n'
+        'try {\n'
+        '  foreach ($part in $parts) {\n'
+        '    $reader = [IO.File]::OpenRead($part.FullName)\n'
+        '    try { $reader.CopyTo($writer) } finally { $reader.Dispose() }\n'
+        '  }\n'
+        '} finally { $writer.Dispose() }\n'
+        '$actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()\n'
+        f'$expected = "{checksum}"\n'
+        'if ($actual -ne $expected) { Remove-Item -LiteralPath $target; throw "ZIP checksum mismatch." }\n'
+        'Write-Host "Created $target (SHA-256 verified)"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    shell_path = output.parent / "rebuild-zip.sh"
+    shell_path.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'cd "$(dirname "$0")"\n'
+        f"cat {output.name}.[0-9][0-9][0-9] > {output.name}\n"
+        f"printf '%s  %s\\n' '{checksum}' '{output.name}' | sha256sum --check -\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    scripts = [
+        {"name": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)}
+        for path in (powershell_path, shell_path)
+    ]
+    return {
+        "created": True,
+        "singleFile": False,
+        "size": size,
+        "sha256": checksum,
+        "assets": parts + scripts,
+        "parts": parts,
+        "reassembly": {"windows": powershell_path.name, "linuxAndroid": shell_path.name},
+    }
 
 
 def build_release_notes(manifest: dict[str, Any], repository: str) -> str:
@@ -265,18 +323,20 @@ def build_release_notes(manifest: dict[str, Any], repository: str) -> str:
         f"- 架构: `{download['architecture']}`",
         f"- 原始文件数: `{len(manifest['artifacts'])}`",
     ]
-    if bundle.get("created"):
-        lines.append(f"- 完整包: [`{bundle['name']}`]({bundle['url']})")
+    if bundle["singleFile"]:
+        lines.append(f"- 完整 ZIP: [`{bundle['name']}`]({bundle['url']})")
     else:
-        lines.append("- 完整包超过单文件发布限制，请使用 `download-index.json` 下载全部原始文件。")
+        lines.append(f"- 完整 ZIP 大小: `{bundle['size']}` 字节")
+        lines.append(f"- ZIP 分片数: `{len(bundle['parts'])}`，每片不超过 1 GB")
+        lines.append("- 下载全部 `.001`、`.002` 等分片和 `rebuild-zip.ps1`，运行脚本还原完整 ZIP。")
     lines.extend(
         [
             f"- 稳定下载索引: https://github.com/{repository}/releases/latest/download/download-index.json",
             "",
             "## 校验与安装",
             "",
-            "文件由 Google Play 直接交付，镜像不修改、不合并、不重新签名。",
-            "请使用 `SHA256SUMS.txt` 校验完整性；存在 split APK 时需与 base APK 一起安装。",
+            "ZIP 内文件由 Google Play 直接交付，镜像不修改、不重新签名。",
+            "还原脚本会验证完整 ZIP 的 SHA-256；存在 split APK 时需与 base APK 一起安装。",
             "",
             "## 来源",
             "",
@@ -311,41 +371,43 @@ def command_finalize(args: argparse.Namespace) -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     asset_limit = int(config["release"].get("assetMaxBytes", 2147483647))
+    part_limit = int(config["release"].get("bundlePartMaxBytes", 1000000000))
+    if part_limit > asset_limit:
+        raise ValueError("release.bundlePartMaxBytes cannot exceed release.assetMaxBytes")
     artifacts: list[dict[str, Any]] = []
-    copied_files: list[Path] = []
     for source in source_files:
         size = source.stat().st_size
-        if size > asset_limit:
-            raise RuntimeError(f"{source.name} exceeds the configured GitHub Release asset limit")
-        destination = args.output_dir / source.name
-        shutil.copy2(source, destination)
-        copied_files.append(destination)
         artifacts.append(
             {
-                "name": destination.name,
-                "kind": artifact_kind(destination.name, package, version_code),
+                "name": source.name,
+                "pathInZip": f"packages/{source.name}",
+                "kind": artifact_kind(source.name, package, version_code),
                 "size": size,
-                "sha256": sha256_file(destination),
-                "url": release_url(args.repository, tag, destination.name),
+                "sha256": sha256_file(source),
             }
         )
 
     bundle_name = str(config["release"]["bundleName"])
     bundle = create_bundle(
-        copied_files,
+        source_files,
         args.output_dir / bundle_name,
-        int(config["release"].get("bundleMaxBytes", 1900000000)),
+        part_limit,
         package,
     )
-    if bundle.get("created"):
-        bundle.update({"name": bundle_name, "url": release_url(args.repository, tag, bundle_name)})
+    bundle["name"] = bundle_name
+    for asset in bundle["assets"]:
+        asset["url"] = release_url(args.repository, tag, asset["name"])
+    for part in bundle["parts"]:
+        part["url"] = release_url(args.repository, tag, part["name"])
+    if bundle["singleFile"]:
+        bundle["url"] = release_url(args.repository, tag, bundle_name)
 
-    checksummed = list(artifacts)
-    if bundle.get("created"):
-        checksummed.append({"name": bundle["name"], "sha256": bundle["sha256"], "size": bundle["size"]})
     with (args.output_dir / "SHA256SUMS.txt").open("w", encoding="ascii", newline="\n") as handle:
-        for item in checksummed:
+        for item in bundle["assets"]:
             handle.write(f"{item['sha256']}  {item['name']}\n")
+        if not bundle["singleFile"]:
+            handle.write("# Complete ZIP after reassembly:\n")
+            handle.write(f"{bundle['sha256']}  {bundle['name']}\n")
 
     manifest = dict(probe)
     manifest["release"] = {
@@ -367,7 +429,8 @@ def command_finalize(args: argparse.Namespace) -> int:
         "app": manifest["app"],
         "release": manifest["release"],
         "bundle": bundle,
-        "assets": artifacts,
+        "assets": bundle["assets"],
+        "components": artifacts,
         "checksums": release_url(args.repository, tag, "SHA256SUMS.txt"),
         "manifest": release_url(args.repository, tag, "release-manifest.json"),
         "latestIndex": f"https://github.com/{args.repository}/releases/latest/download/download-index.json",
