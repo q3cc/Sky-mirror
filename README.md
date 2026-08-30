@@ -24,17 +24,22 @@
 
 此工作流通过非官方 Google Play 客户端访问 Play，需要使用独立 Google 账号。不要使用绑定付款方式或重要数据的主账号。
 
-在本地准备 API Key：
+在 Windows PowerShell 中准备 API Key。以下命令将虚拟环境、依赖和 gplaydl 配置都放在 D 盘仓库内，并禁用 pip 缓存：
 
-```bash
-python -m pip install "gplaydl==4.2.1"
-gplaydl link
+```powershell
+Set-Location D:\Documents\Sky-mirror
+$env:PIP_NO_CACHE_DIR = "1"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --requirement requirements.txt
+$env:USERPROFILE = Join-Path $PWD ".gplaydl-home"
+.\.venv\Scripts\gplaydl.exe link
 ```
 
 按照提示在 Android 手机上的 gplaydl Authenticator 中添加账号并完成配对，然后读取生成的 Key：
 
-```bash
-jq -r .api_key ~/.config/gplaydl/config.json
+```powershell
+$config = Get-Content .\.gplaydl-home\.config\gplaydl\config.json | ConvertFrom-Json
+$config.api_key
 ```
 
 进入 GitHub 仓库：
