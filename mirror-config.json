@@ -16,6 +16,7 @@
     "tagPrefix": "sky-android",
     "bundleName": "sky-android-arm64.zip",
     "bundlePartMaxBytes": 1000000000,
-    "assetMaxBytes": 2147483647
+    "assetMaxBytes": 2147483647,
+    "domesticMirrorUrl": "https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH"
   }
 }

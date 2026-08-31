@@ -14,6 +14,8 @@ mirror = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(mirror)
 
+DOMESTIC_MIRROR_URL = "https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH"
+
 
 def config(part_limit: int = 1_000_000_000) -> dict:
     return {
@@ -35,6 +37,7 @@ def config(part_limit: int = 1_000_000_000) -> dict:
             "bundleName": "sky-android-arm64.zip",
             "bundlePartMaxBytes": part_limit,
             "assetMaxBytes": 2_147_483_647,
+            "domesticMirrorUrl": DOMESTIC_MIRROR_URL,
         },
     }
 
@@ -109,6 +112,10 @@ class MirrorTests(unittest.TestCase):
                 )
             self.assertTrue((output_dir / "download-index.json").is_file())
             self.assertIn("sky-android-arm64.zip", (output_dir / "SHA256SUMS.txt").read_text())
+            release_notes = (output_dir / "release-notes.md").read_text(encoding="utf-8")
+            self.assertIn("# Sky Android 镜像更新", release_notes)
+            self.assertIn(DOMESTIC_MIRROR_URL, release_notes)
+            self.assertEqual(manifest["release"]["domesticMirrorUrl"], DOMESTIC_MIRROR_URL)
             self.assertFalse((output_dir / "com.tgc.sky.android-77.apk").exists())
 
     def test_finalize_splits_zip_above_configured_limit_and_reassembles(self) -> None:

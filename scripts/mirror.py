@@ -55,6 +55,12 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("download.locales must be an array")
     if not release.get("tagPrefix") or not release.get("bundleName"):
         raise ValueError("release.tagPrefix and release.bundleName are required")
+    domestic_mirror_url = release.get("domesticMirrorUrl")
+    if domestic_mirror_url is not None and (
+        not isinstance(domestic_mirror_url, str)
+        or not domestic_mirror_url.startswith("https://")
+    ):
+        raise ValueError("release.domesticMirrorUrl must be an HTTPS URL")
     return config
 
 
@@ -314,31 +320,92 @@ def build_release_notes(manifest: dict[str, Any], repository: str) -> str:
     app = manifest["app"]
     download = manifest["download"]
     bundle = manifest["bundle"]
+    release = manifest["release"]
+    release_page = (
+        f"https://github.com/{repository}/releases/tag/"
+        f"{quote(release['tag'], safe='')}"
+    )
+    domestic_mirror_url = str(release.get("domesticMirrorUrl") or "").strip()
     lines = [
-        f"# Sky: Children of the Light {app['versionName']}",
+        "# Sky Android 镜像更新",
+        "",
+        f"本次 Release 同步了 **Sky: Children of the Light** `{app['versionName']}` "
+        f"（versionCode `{app['versionCode']}`）的 Google Play 安装组件。",
         "",
         "## 下载",
         "",
-        f"- Google Play versionCode: `{app['versionCode']}`",
-        f"- 架构: `{download['architecture']}`",
-        f"- 原始文件数: `{len(manifest['artifacts'])}`",
+        f"- GitHub Release: {release_page}",
+        f"- 稳定下载索引: https://github.com/{repository}/releases/latest/download/download-index.json",
     ]
-    if bundle["singleFile"]:
-        lines.append(f"- 完整 ZIP: [`{bundle['name']}`]({bundle['url']})")
-    else:
-        lines.append(f"- 完整 ZIP 大小: `{bundle['size']}` 字节")
-        lines.append(f"- ZIP 分片数: `{len(bundle['parts'])}`，每片不超过 1 GB")
-        lines.append("- 下载全部 `.001`、`.002` 等分片和 `rebuild-zip.ps1`，运行脚本还原完整 ZIP。")
+    if domestic_mirror_url:
+        lines.append(f"- 国内网盘分流（123云盘）: {domestic_mirror_url}")
+        lines.extend(
+            [
+                "",
+                "国内网盘不属于 GitHub Actions 自动发布流程。通过网盘下载后，"
+                "请选择相同版本，并用本 Release 的 `SHA256SUMS.txt` 校验文件。",
+            ]
+        )
+    lines.append("")
+
     lines.extend(
         [
-            f"- 稳定下载索引: https://github.com/{repository}/releases/latest/download/download-index.json",
+            "## 版本与文件",
             "",
-            "## 校验与安装",
+            "| 项目 | 内容 |",
+            "|---|---|",
+            f"| versionName | `{app['versionName']}` |",
+            f"| versionCode | `{app['versionCode']}` |",
+            f"| 架构 | `{download['architecture']}` |",
+            f"| Google Play 原始文件 | `{len(manifest['artifacts'])}` 个 |",
+        ]
+    )
+    if bundle["singleFile"]:
+        lines.append(f"| 完整 ZIP | [`{bundle['name']}`]({bundle['url']}) |")
+    else:
+        lines.append(f"| 完整 ZIP 大小 | `{bundle['size']}` 字节 |")
+        lines.append(f"| ZIP 分片 | `{len(bundle['parts'])}` 个，每片不超过 1 GB |")
+        part_names = "、".join(f"`{part['name']}`" for part in bundle["parts"])
+        lines.extend(["", f"分片文件：{part_names}"])
+
+    lines.extend(
+        [
             "",
-            "ZIP 内文件由 Google Play 直接交付，镜像不修改、不重新签名。",
-            "还原脚本会验证完整 ZIP 的 SHA-256；存在 split APK 时需与 base APK 一起安装。",
+            "## 还原与安装",
             "",
-            "## 来源",
+        ]
+    )
+    if bundle["singleFile"]:
+        lines.append(f"下载并解压 `{bundle['name']}`。")
+    else:
+        lines.extend(
+            [
+                "下载全部 ZIP 分片和对应的还原脚本，放在同一目录运行：",
+                "",
+                "```powershell",
+                ".\\rebuild-zip.ps1",
+                "```",
+                "",
+                "```bash",
+                "bash rebuild-zip.sh",
+                "```",
+                "",
+                "还原脚本会生成 `sky-android-arm64.zip`，并自动核对完整 ZIP 的 SHA-256。",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "解压 ZIP 后，用 ADB 一次安装 base APK 和全部 split APK：",
+            "",
+            "```bash",
+            f"adb install-multiple packages/{app['packageName']}-*.apk",
+            "```",
+            "",
+            "## 校验与来源",
+            "",
+            "ZIP 内组件由 Google Play 直接交付，本镜像不修改、不合并，也不重新签名。",
+            "`gplaydl` 会按 Google Play 交付清单校验下载内容；本 Release 另附 `SHA256SUMS.txt`、`release-manifest.json` 和 `download-index.json`。",
             "",
             f"- Package: `{app['packageName']}`",
             f"- Google Play: {app['playUrl']}",
@@ -415,6 +482,9 @@ def command_finalize(args: argparse.Namespace) -> int:
         "publishedFrom": args.repository,
         "preparedAt": utc_now(),
     }
+    domestic_mirror_url = str(config["release"].get("domesticMirrorUrl") or "").strip()
+    if domestic_mirror_url:
+        manifest["release"]["domesticMirrorUrl"] = domestic_mirror_url
     manifest["artifacts"] = artifacts
     manifest["bundle"] = bundle
     manifest["verification"] = {

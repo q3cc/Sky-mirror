@@ -1,7 +1,21 @@
-# Sky-mirror
+<h1 align="center">Sky-mirror</h1>
 
-[![Mirror Sky from Google Play](https://github.com/q3cc/Sky-mirror/actions/workflows/mirror.yml/badge.svg)](https://github.com/q3cc/Sky-mirror/actions/workflows/mirror.yml)
-[![CI](https://github.com/q3cc/Sky-mirror/actions/workflows/ci.yml/badge.svg)](https://github.com/q3cc/Sky-mirror/actions/workflows/ci.yml)
+<p align="center">
+  定时镜像 Google Play 上的 <b>Sky: Children of the Light</b> Android 安装文件，<br>
+  保留原始组件，提供 SHA-256 校验和国内网盘分流。
+</p>
+
+<p align="center">
+  <a href="https://github.com/q3cc/Sky-mirror/releases/latest"><b>GitHub Release</b></a> ·
+  <a href="https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH"><b>123云盘国内分流</b></a> ·
+  <a href="https://play.google.com/store/apps/details?id=com.tgc.sky.android">Google Play</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/q3cc/Sky-mirror/actions/workflows/mirror.yml"><img src="https://github.com/q3cc/Sky-mirror/actions/workflows/mirror.yml/badge.svg" alt="Mirror Sky from Google Play"></a>
+  <a href="https://github.com/q3cc/Sky-mirror/actions/workflows/ci.yml"><img src="https://github.com/q3cc/Sky-mirror/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH"><img src="https://img.shields.io/badge/国内分流-123云盘-00a1e9" alt="123云盘国内分流"></a>
+</p>
 
 `Sky-mirror` 每 6 小时检查一次 Google Play 上的 **Sky: Children of the Light** Android 版本。发现更新后，它会下载 Play 实际交付的 APK、split APK 和附加资产，整理成可校验的分片 ZIP，并发布到 GitHub Releases。
 
@@ -15,6 +29,13 @@
 > 这是非官方镜像，与 Google、Google Play、thatgamecompany 没有隶属关系。
 
 ## 下载
+
+| 渠道 | 地址 | 说明 |
+|---|---|---|
+| GitHub Releases | [下载最新版本](https://github.com/q3cc/Sky-mirror/releases/latest) | 工作流自动发布，包含版本清单和校验文件 |
+| 国内网盘 | [123云盘分流](https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH) | 适合 GitHub 下载较慢时使用 |
+
+国内网盘不属于 GitHub Actions 自动发布流程。通过网盘下载后，建议找到相同版本，并用 GitHub Release 中的 `SHA256SUMS.txt` 核对文件。
 
 每个 Release 都会提供 ZIP、校验文件和版本清单：
 
@@ -130,6 +151,7 @@ API Key 只放在 GitHub Secret 中，不要提交到仓库。
 | `download.includeExtras` | `true` | 包含 OBB 和附加资产 |
 | `download.includeDexMetadata` | `false` | 是否包含 Dex Metadata |
 | `release.bundlePartMaxBytes` | `1000000000` | 单个 ZIP 分片上限 |
+| `release.domesticMirrorUrl` | `https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH` | 国内网盘分流入口 |
 
 `gplaydl` 当前支持的架构值为 `arm64`、`armv7`、`x86`、`x86_64` 和 `tv`。
 
