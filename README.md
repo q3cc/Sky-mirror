@@ -17,7 +17,7 @@
   <a href="https://1829561701.share.123pan.cn/123pan/uN8cjv-0hjPH"><img src="https://img.shields.io/badge/国内分流-123云盘-00a1e9" alt="123云盘国内分流"></a>
 </p>
 
-`Sky-mirror` 每 6 小时检查一次 Google Play 上的 **Sky: Children of the Light** Android 版本。发现更新后，它会下载 Play 实际交付的 APK、split APK 和附加资产，整理成可校验的分片 ZIP，并发布到 GitHub Releases。
+`Sky-mirror` 每小时检查一次 Google Play 上的 **Sky: Children of the Light** Android 版本。发现更新后，它会下载 Play 实际交付的 APK、split APK 和附加资产，整理成可校验的分片 ZIP，并发布到 GitHub Releases。
 
 仓库里只有镜像脚本和工作流，不保存安装包。ZIP 内的安装组件保持 Google Play 交付的原始字节，不合并 APK、不修改内容，也不重新签名。
 
