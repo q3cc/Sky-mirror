@@ -92,14 +92,23 @@ adb install-multiple packages/com.tgc.sky.android-*.apk
 
 ## 镜像怎么更新
 
-1. `probe` 使用 `gplaydl` 查询 Google Play 当前的 `versionName` 和 `versionCode`。
+1. `probe` 用 `apkeep` 只下载 base APK（约 50 MB），再用 `aapt2` 读出当前的 `versionName` 和 `versionCode`；apkeep 失败时改用 `gplaydl` 查询。
 2. 脚本把稳定版本字段与最新 Release 中的 `release-manifest.json` 比较。
 3. 版本没变就结束，不下载，也不重复发版。
-4. 发现新版后，工作流下载 base APK、配置 split 和附加资产，并核对探测版本与实际下载版本。
+4. 发现新版后，工作流先用 `apkeep` 下载 base APK、配置 split 和附加资产；失败时自动改用 `gplaydl`。随后用 `apksigner` 确认所有 APK 由同一个开发者证书签名，并核对探测版本与实际下载版本。
 5. 脚本生成 ZIP、`SHA256SUMS.txt`、`release-manifest.json` 和 `download-index.json`。ZIP 超过 1 GB 时自动切成连续分片。
 6. 工作流先创建 Draft Release；所有 Assets 上传成功后，才把它发布为 Latest。
 
-`gplaydl` 会按 Google Play 交付清单中的 SHA-256 校验下载内容，仓库自己的发布脚本还会为 ZIP、分片和清单记录校验值。
+两条下载通道：
+
+| 通道 | 鉴权 | 文件校验 |
+|---|---|---|
+| `apkeep`（主） | 自己的 Google 账号 AAS token，直连 Google | `apksigner` 签名校验，证书指纹固定在 `app.signingCertSha256` |
+| `gplaydl`（备用） | gplaydl 第三方 token dispenser | 按 Play 交付清单中的 SHA-256 校验，再做同样的签名校验 |
+
+`release-manifest.json` 会记录本次实际使用的通道和签名证书。仓库自己的发布脚本还会为 ZIP、分片和清单记录校验值。
+
+任务失败，或主通道失败、由备用通道完成时，工作流会自动打开（或更新）一个带 `mirror-failure` 标签的 issue；任务恢复正常后自动关闭。
 
 ## 在自己的仓库运行
 
@@ -107,7 +116,19 @@ adb install-multiple packages/com.tgc.sky.android-*.apk
 
 工作流通过非官方 Google Play 客户端访问 Play，需要一个独立 Google 账号。不要使用绑定付款方式或存有重要数据的主账号。
 
-### 准备 gplaydl API Key
+### 准备 apkeep AAS token（主通道）
+
+1. 在浏览器无痕窗口打开 <https://accounts.google.com/EmbeddedSetup>，用镜像专用账号登录并点击 “I agree”。
+2. 打开开发者工具 → Application → Cookies，复制 `oauth_token` 的值（以 `oauth2_4/` 开头，只能使用一次）。
+3. 用 [apkeep](https://github.com/EFForg/apkeep/blob/master/USAGE-google-play.md) 换取长期有效的 AAS token：
+
+```bash
+apkeep -e 'mirror-account@gmail.com' --oauth-token 'oauth2_4/...'
+```
+
+把输出的 AAS token（以 `aas_et/` 开头）保存为 Secret `APKEEP_AAS_TOKEN`，账号邮箱保存为 `APKEEP_EMAIL`。
+
+### 准备 gplaydl API Key（备用通道）
 
 下面以 Windows PowerShell 为例。命令会把虚拟环境、依赖和 `gplaydl` 配置都放在仓库目录内，并禁用 pip 缓存：
 
@@ -133,10 +154,12 @@ $config.api_key
 
 | Secret | 必需 | 说明 |
 |---|---|---|
-| `GPLAYDL_API_KEY` | 是 | `config.json` 中的 `api_key` |
-| `GPLAYDL_EMAIL` | 否 | 配置了多个账号时指定其中一个 |
+| `APKEEP_EMAIL` | 主通道必需 | 镜像专用 Google 账号邮箱 |
+| `APKEEP_AAS_TOKEN` | 主通道必需 | apkeep 换取的 AAS token |
+| `GPLAYDL_API_KEY` | 备用通道必需 | `config.json` 中的 `api_key` |
+| `GPLAYDL_EMAIL` | 否 | gplaydl 配置了多个账号时指定其中一个 |
 
-API Key 只放在 GitHub Secret 中，不要提交到仓库。
+至少要配置一条通道。Token 和 API Key 只放在 GitHub Secret 中，不要提交到仓库。
 
 ### 调整镜像目标
 
@@ -145,7 +168,9 @@ API Key 只放在 GitHub Secret 中，不要提交到仓库。
 | 配置 | 当前值 | 用途 |
 |---|---|---|
 | `app.packageName` | `com.tgc.sky.android` | Google Play 包名 |
-| `download.architecture` | `arm64` | 下载架构 |
+| `app.signingCertSha256` | Sky 的签名证书指纹 | 所有 APK 必须由这个证书签名 |
+| `download.sources` | `["apkeep", "gplaydl"]` | 下载通道及尝试顺序 |
+| `download.architecture` | `arm64` | 下载架构（apkeep 通道只支持 `arm64`） |
 | `download.locales` | `[]` | 需要额外下载的语言 split |
 | `download.includeSplits` | `true` | 包含配置 split |
 | `download.includeExtras` | `true` | 包含 OBB 和附加资产 |
@@ -160,6 +185,8 @@ API Key 只放在 GitHub Secret 中，不要提交到仓库。
 打开仓库的 `Actions` → `Mirror Sky from Google Play` → `Run workflow`。
 
 `force_release` 会强制重新准备当前版本，适合修复不完整的 Release。正常探测更新时保持关闭。
+
+`dry_run` 会完整执行下载、校验和打包，但不会创建或修改 Release，也不会更新 issue。和 `force_release` 一起打开，可以在不发版的情况下测试整条流程。
 
 ## 本地测试
 
@@ -179,7 +206,7 @@ python -m py_compile scripts/mirror.py tests/test_mirror.py
 
 ## 致谢
 
-自动化结构参考 [Wangnov/codex-app-mirror](https://github.com/Wangnov/codex-app-mirror)，Google Play 下载由 [rehmatworks/gplaydl](https://github.com/rehmatworks/gplaydl) 提供。
+自动化结构参考 [Wangnov/codex-app-mirror](https://github.com/Wangnov/codex-app-mirror)，Google Play 下载由 [EFForg/apkeep](https://github.com/EFForg/apkeep) 和 [rehmatworks/gplaydl](https://github.com/rehmatworks/gplaydl) 提供。
 
 ## License
 

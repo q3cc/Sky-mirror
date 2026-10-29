@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      dry_run:
+        description: Download and prepare everything, but do not create or change a release
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: "17 * * * *"
 
@@ -27,6 +32,8 @@ jobs:
       release_tag: ${{ steps.probe.outputs.release_tag }}
       release_title: ${{ steps.probe.outputs.release_title }}
       skip_reason: ${{ steps.probe.outputs.skip_reason }}
+      degraded: ${{ steps.probe.outputs.degraded }}
+      failures: ${{ steps.probe.outputs.failures }}
     steps:
       - uses: actions/checkout@v6
 
@@ -35,8 +42,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install downloader
-        run: python -m pip install --requirement requirements.txt
+      - name: Install downloaders
+        run: |
+          python -m pip install --requirement requirements.txt
+          bash scripts/install-apkeep.sh
 
       - name: Download latest release manifest
         env:
@@ -53,6 +62,8 @@ jobs:
       - name: Probe current version
         id: probe
         env:
+          APKEEP_EMAIL: ${{ secrets.APKEEP_EMAIL }}
+          APKEEP_AAS_TOKEN: ${{ secrets.APKEEP_AAS_TOKEN }}
           GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
           GPLAYDL_EMAIL: ${{ secrets.GPLAYDL_EMAIL }}
           FORCE_RELEASE: ${{ inputs.force_release || 'false' }}
@@ -85,6 +96,9 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
+    outputs:
+      degraded: ${{ steps.download.outputs.degraded }}
+      failures: ${{ steps.download.outputs.failures }}
     steps:
       - uses: actions/checkout@v6
 
@@ -93,8 +107,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install downloader
-        run: python -m pip install --requirement requirements.txt
+      - name: Install downloaders
+        run: |
+          python -m pip install --requirement requirements.txt
+          bash scripts/install-apkeep.sh
 
       - uses: actions/download-artifact@v8
         with:
@@ -102,32 +118,20 @@ jobs:
           path: dist/probe
 
       - name: Download original Google Play files
+        id: download
         env:
+          APKEEP_EMAIL: ${{ secrets.APKEEP_EMAIL }}
+          APKEEP_AAS_TOKEN: ${{ secrets.APKEEP_AAS_TOKEN }}
           GPLAYDL_API_KEY: ${{ secrets.GPLAYDL_API_KEY }}
           GPLAYDL_EMAIL: ${{ secrets.GPLAYDL_EMAIL }}
         shell: bash
         run: |
           set -euo pipefail
-          package="$(jq -r '.app.packageName' mirror-config.json)"
-          arch="$(jq -r '.download.architecture' mirror-config.json)"
-          args=(download "$package" --output dist/download --arch "$arch")
-          if [[ -n "${GPLAYDL_EMAIL:-}" ]]; then
-            args+=(--email "$GPLAYDL_EMAIL")
-          fi
-          if [[ "$(jq -r '.download.includeSplits' mirror-config.json)" != "true" ]]; then
-            args+=(--no-splits)
-          fi
-          if [[ "$(jq -r '.download.includeExtras' mirror-config.json)" != "true" ]]; then
-            args+=(--no-extras)
-          fi
-          if [[ "$(jq -r '.download.includeDexMetadata' mirror-config.json)" == "true" ]]; then
-            args+=(--dm)
-          fi
-          locales="$(jq -r '.download.locales | join(",")' mirror-config.json)"
-          if [[ -n "$locales" ]]; then
-            args+=(--locale "$locales")
-          fi
-          gplaydl "${args[@]}"
+          python scripts/mirror.py download \
+            --config mirror-config.json \
+            --probe dist/probe/probe-manifest.json \
+            --output-dir dist/download \
+            --meta dist/download-meta.json
 
       - name: Verify and prepare release
         id: meta
@@ -138,10 +142,20 @@ jobs:
             --config mirror-config.json \
             --probe dist/probe/probe-manifest.json \
             --input-dir dist/download \
+            --download-meta dist/download-meta.json \
             --output-dir dist/release \
             --repository "$GITHUB_REPOSITORY"
 
+      - name: Show prepared assets (dry run)
+        if: inputs.dry_run
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist/release
+          jq '{download, verification, artifacts: [.artifacts[] | {name, size}]}' dist/release/release-manifest.json
+
       - name: Create or resume draft release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -163,6 +177,7 @@ jobs:
           fi
 
       - name: Upload release assets
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -180,6 +195,7 @@ jobs:
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
 
       - name: Publish as latest release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -195,10 +211,91 @@ jobs:
             --title "$RELEASE_TITLE" \
             --notes-file dist/release/release-notes.md
 
-  unchanged:
-    name: Already current
-    needs: probe
-    if: needs.probe.outputs.should_release != 'true'
+  status:
+    name: Track problems in an issue
+    needs: [probe, release]
+    # Runs after every scheduled or manual run, except dry runs.
+    if: ${{ always() && !inputs.dry_run }}
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
-      - run: echo "${{ needs.probe.outputs.skip_reason }}"
+      - name: Open, update or close the mirror-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PROBE_RESULT: ${{ needs.probe.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          PROBE_DEGRADED: ${{ needs.probe.outputs.degraded }}
+          RELEASE_DEGRADED: ${{ needs.release.outputs.degraded }}
+          PROBE_FAILURES: ${{ needs.probe.outputs.failures }}
+          RELEASE_FAILURES: ${{ needs.release.outputs.failures }}
+          SKIP_REASON: ${{ needs.probe.outputs.skip_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          label="mirror-failure"
+
+          if [[ "$PROBE_RESULT" == "cancelled" || "$RELEASE_RESULT" == "cancelled" ]]; then
+            echo "Run was cancelled; leaving the issue alone."
+            exit 0
+          fi
+
+          state=""
+          if [[ "$PROBE_RESULT" == "failure" || "$RELEASE_RESULT" == "failure" ]]; then
+            state="镜像任务失败"
+          elif [[ "$PROBE_DEGRADED" == "true" || "$RELEASE_DEGRADED" == "true" ]]; then
+            state="主通道 apkeep 失败，本次已由备用通道完成"
+          fi
+          details="$(printf '%s\n%s' "$PROBE_FAILURES" "$RELEASE_FAILURES" | sed '/^$/d; s/^/- /')"
+
+          issue="$(gh issue list --label "$label" --state open --limit 1 --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+
+          if [[ -z "$state" ]]; then
+            echo "Healthy (${SKIP_REASON:-released})."
+            if [[ -n "$issue" ]]; then
+              gh issue close "$issue" --comment "镜像已恢复正常：$RUN_URL"
+            fi
+            exit 0
+          fi
+
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          count=1
+          first="$now"
+          if [[ -n "$issue" ]]; then
+            old_body="$(gh issue view "$issue" --json body --jq .body)"
+            marker="$(grep -o 'sky-mirror:count=[0-9]* first=[0-9TZ:-]*' <<<"$old_body" || true)"
+            if [[ -n "$marker" ]]; then
+              count=$(( $(sed -E 's/.*count=([0-9]+).*/\1/' <<<"$marker") + 1 ))
+              first="$(sed -E 's/.*first=//' <<<"$marker")"
+            fi
+          fi
+
+          body="$(cat <<EOF
+          **状态：** ${state}
+
+          - 连续异常次数：${count}
+          - 首次发现：${first}
+          - 最近一次：${now}，[查看运行记录](${RUN_URL})
+
+          **失败的下载通道**
+          ${details:-（没有具体信息，请看运行记录）}
+
+          **常见原因**
+          - apkeep：\`APKEEP_AAS_TOKEN\` 失效，重新获取 AAS token 并更新 Secret。
+          - gplaydl：gplaydl Authenticator 里的账号掉线，重新添加账号。
+
+          任务恢复正常后，这个 issue 会自动关闭。
+
+          <!-- sky-mirror:count=${count} first=${first} -->
+          EOF
+          )"
+
+          if [[ -n "$issue" ]]; then
+            # Edit instead of commenting so an hourly failure does not send an hourly notification.
+            gh issue edit "$issue" --body "$body"
+          else
+            gh label create "$label" --color d73a4a --description "Sky mirror workflow problems" 2>/dev/null || true
+            gh issue create --title "Sky 镜像任务异常" --label "$label" --body "$body"
+          fi

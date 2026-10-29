@@ -21,5 +21,7 @@ jobs:
         run: python -m json.tool mirror-config.json >/dev/null
       - name: Compile Python
         run: python -m py_compile scripts/mirror.py tests/test_mirror.py
+      - name: Check shell scripts
+        run: bash -n scripts/install-apkeep.sh
       - name: Run tests
         run: python -m unittest discover --start-directory tests --verbose
