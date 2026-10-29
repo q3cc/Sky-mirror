@@ -196,7 +196,18 @@ if args == ["--version"]:
     print("apkeep 1.1.0"); sys.exit(0)
 Path(os.environ["FAKE_ARGV_LOG"]).write_text(" ".join(args))
 ini = Path(args[args.index("-i") + 1]).read_text()
-if "aas_token = good-token" not in ini or os.environ.get("FAKE_APKEEP_MODE") == "fail":
+mode = os.environ.get("FAKE_APKEEP_MODE", "")
+calls = Path(os.environ["FAKE_ARGV_LOG"] + ".calls")
+count = int(calls.read_text()) + 1 if calls.exists() else 1
+calls.write_text(str(count))
+out = Path(args[-1])
+if mode == "flaky" and count == 1:
+    pkg = args[args.index("-a") + 1]
+    (out / pkg).mkdir()
+    (out / pkg / "partial.apk").write_bytes(b"half")
+    print(f"Downloading {pkg} from Google Play...")
+    sys.exit(0)  # the real failure message is swallowed without a terminal
+if "aas_token = good-token" not in ini or mode == "fail":
     print("Could not log in to Google Play. Please check your credentials and try again later.")
     sys.exit(0)  # apkeep really does exit 0 here
 pkg = args[args.index("-a") + 1]
@@ -258,6 +269,7 @@ class SourceTests(unittest.TestCase):
             "APKEEP_EMAIL": "mirror@example.com",
             "APKEEP_AAS_TOKEN": "good-token",
             "FAKE_ARGV_LOG": str(self.root / "argv.txt"),
+            "APKEEP_RETRY_DELAY": "0",
         }
         for name, body in tools.items():
             path = bin_dir / name.lower()
@@ -337,6 +349,20 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(meta["failedSources"]), 1)
         self.assertIn("apkeep", meta["failedSources"][0])
         self.assertEqual(names, [f"{PACKAGE}-77-config.arm64_v8a.apk", f"{PACKAGE}-77.apk"])
+
+    def test_apkeep_is_retried_in_a_clean_directory(self) -> None:
+        os.environ["FAKE_APKEEP_MODE"] = "flaky"
+        _, meta, names = self.download()
+        self.assertEqual(meta["downloader"]["name"], "apkeep")
+        self.assertEqual((self.root / "argv.txt.calls").read_text(), "2")
+        self.assertNotIn("partial.apk", " ".join(names))
+        self.assertEqual(len(names), 3)
+
+    def test_apkeep_gives_up_after_configured_attempts(self) -> None:
+        os.environ["FAKE_APKEEP_MODE"] = "fail"
+        _, meta, _ = self.download()
+        self.assertEqual((self.root / "argv.txt.calls").read_text(), "3")
+        self.assertIn("after 3 attempts", meta["failedSources"][0])
 
     def test_mixed_signers_reject_apkeep_download(self) -> None:
         os.environ["FAKE_SPLIT"] = "evil"

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -276,7 +277,7 @@ def apkeep_ini() -> Iterator[Path]:
         path.unlink(missing_ok=True)
 
 
-def run_apkeep(package: str, output_dir: Path, options: list[str]) -> None:
+def run_apkeep_once(package: str, output_dir: Path, options: list[str]) -> None:
     with apkeep_ini() as ini:
         command = [find_executable("apkeep", "APKEEP"), "-a", package, "-d", "google-play", "-i", str(ini)]
         if options:
@@ -284,9 +285,31 @@ def run_apkeep(package: str, output_dir: Path, options: list[str]) -> None:
         command.append(str(output_dir))
         result = run_tool(command, timeout=3600)
     output = f"{result.stdout}\n{result.stderr}"
-    # apkeep can exit 0 after a failed login or download, so check its message too.
+    # apkeep can exit 0 after a failed download, and without a terminal it hides the
+    # reason (it is printed through the progress bar), so check for the success line.
     if result.returncode != 0 or "downloaded successfully" not in output:
-        raise SourceError(f"apkeep failed: {tail(output)}")
+        got = sum(1 for path in output_dir.rglob("*") if path.is_file())
+        raise SourceError(f"apkeep failed ({got} files written): {tail(output)}")
+
+
+def run_apkeep(package: str, output_dir: Path, options: list[str]) -> None:
+    """Retry with an empty directory each time.
+
+    apkeep's own retries are no-ops for split downloads: after a partial first
+    attempt the split directory exists, so it skips with "directory already exists".
+    """
+    attempts = max(1, int(os.environ.get("APKEEP_ATTEMPTS", "3")))
+    delay = int(os.environ.get("APKEEP_RETRY_DELAY", "20"))
+    for attempt in range(1, attempts + 1):
+        reset_dir(output_dir)
+        try:
+            run_apkeep_once(package, output_dir, options)
+            return
+        except SourceError as exc:
+            if attempt == attempts:
+                raise SourceError(f"{exc} (after {attempts} attempts)") from exc
+            warn(f"apkeep attempt {attempt}/{attempts} failed, retrying in {delay}s: {exc}")
+            time.sleep(delay * attempt)
 
 
 def apkeep_version() -> str:
