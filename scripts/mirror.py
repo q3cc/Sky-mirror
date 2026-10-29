@@ -203,7 +203,9 @@ def signer_digests(apk: Path) -> set[str]:
     result = run_tool(
         [find_android_tool("apksigner", "APKSIGNER"), "verify", "--print-certs", str(apk)], timeout=600
     )
-    digests = set(re.findall(r"certificate SHA-256 digest: ([0-9a-f]{64})", result.stdout))
+    # Only "Signer #N" lines are the developer's certificates. Play-delivered APKs may also
+    # carry a "Source Stamp Signer" line (Google Play's own stamp), which is not a signer.
+    digests = set(re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-f]{64})$", result.stdout, re.M))
     if result.returncode != 0 or not digests:
         raise SourceError(f"apksigner rejected {apk.name}: {tail(result.stderr or result.stdout)}")
     return digests

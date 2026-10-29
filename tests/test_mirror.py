@@ -225,6 +225,8 @@ data = Path(sys.argv[-1]).read_bytes()
 digest = ("b" if data.startswith(b"evil") else "a") * 64
 print(f"Signer #1 certificate DN: CN=test")
 print(f"Signer #1 certificate SHA-256 digest: {digest}")
+print("Source Stamp Signer certificate DN: CN=Google Play")
+print(f"Source Stamp Signer certificate SHA-256 digest: {'c' * 64}")
 '''
 
 FAKE_GPLAYDL = r'''#!/usr/bin/env python3
