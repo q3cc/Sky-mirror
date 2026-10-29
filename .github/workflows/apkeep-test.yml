@@ -1,0 +1,125 @@
+name: apkeep download test
+
+# Temporary: checks whether apkeep (own Google account, no dispenser)
+# downloads the same files as gplaydl. Nothing is published.
+on:
+  push:
+    branches: [apkeep-test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APKEEP_VERSION: "1.1.0"
+  APKEEP_SHA256: badd7ad9fa7d2f32abe01eaf33b7ff086361a95bbc000a33bf44b630d4bf2140
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install apkeep
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/apkeep" \
+            "https://github.com/EFForg/apkeep/releases/download/${APKEEP_VERSION}/apkeep-x86_64-unknown-linux-gnu"
+          echo "${APKEEP_SHA256}  $RUNNER_TEMP/bin/apkeep" | sha256sum --check -
+          chmod +x "$RUNNER_TEMP/bin/apkeep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Download with apkeep
+        env:
+          APKEEP_EMAIL: ${{ secrets.APKEEP_EMAIL }}
+          APKEEP_AAS_TOKEN: ${{ secrets.APKEEP_AAS_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(jq -r '.app.packageName' mirror-config.json)"
+          # Keep the token out of the process list: pass it through an ini file.
+          ini="$RUNNER_TEMP/apkeep.ini"
+          umask 077
+          printf '[google]\nemail = %s\naas_token = %s\n' "$APKEEP_EMAIL" "$APKEEP_AAS_TOKEN" > "$ini"
+          mkdir -p dist/apkeep
+          apkeep -a "$package" -d google-play -i "$ini" \
+            -o split_apk=true,include_additional_files=true \
+            dist/apkeep
+          rm -f "$ini"
+          find dist/apkeep -type f -printf '%s\t%P\n' | sort -k2
+
+      - name: Compare with latest gplaydl release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download --pattern release-manifest.json --dir previous
+          aapt2="$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)"
+          package="$(jq -r '.app.packageName' mirror-config.json)"
+          base="dist/apkeep/$package/$package.apk"
+          [[ -f "$base" ]] || base="dist/apkeep/$package.apk"
+          "$aapt2" dump badging "$base" | head -1
+          python3 - "$package" "$base" <<'PY'
+          import hashlib, json, os, re, subprocess, sys
+          from pathlib import Path
+
+          package, base = sys.argv[1], Path(sys.argv[2])
+          manifest = json.load(open("previous/release-manifest.json"))
+          vc_old = manifest["app"]["versionCode"]
+          aapt2 = sorted(Path(os.environ["ANDROID_HOME"]).glob("build-tools/*/aapt2"))[-1]
+          badging = subprocess.run([str(aapt2), "dump", "badging", str(base)],
+                                   capture_output=True, text=True).stdout
+          vc_new = int(re.search(r"versionCode='(\d+)'", badging).group(1))
+
+          def sha(p):
+              h = hashlib.sha256()
+              with open(p, "rb") as f:
+                  for c in iter(lambda: f.read(1 << 20), b""):
+                      h.update(c)
+              return h.hexdigest()
+
+          # Map apkeep names to gplaydl names: pkg.apk -> base, pkg.<split>.apk -> <split>
+          got = {}
+          for p in Path("dist/apkeep").rglob("*"):
+              if not p.is_file():
+                  continue
+              name = p.name
+              if name == f"{package}.apk":
+                  key = "base"
+              elif name.startswith(package + ".") and name.endswith(".apk"):
+                  key = name[len(package) + 1:-4]
+              else:
+                  key = name  # OBB or anything unexpected
+              got[key] = p
+
+          want = {}
+          for a in manifest["artifacts"]:
+              n = a["name"]
+              if a["kind"] == "base-apk":
+                  want["base"] = a
+              else:
+                  m = re.fullmatch(re.escape(f"{package}-{vc_old}-") + r"(.+)\.apk", n)
+                  want[m.group(1) if m else n] = a
+
+          lines = [f"apkeep versionCode: {vc_new}; last gplaydl release: {vc_old}", ""]
+          missing = sorted(set(want) - set(got))
+          extra = sorted(set(got) - set(want))
+          lines.append(f"gplaydl files: {len(want)}, apkeep files: {len(got)}")
+          lines.append(f"missing in apkeep: {missing or 'none'}")
+          lines.append(f"extra in apkeep: {extra or 'none'}")
+          if vc_new == vc_old:
+              diff = [k for k in sorted(set(want) & set(got)) if sha(got[k]) != want[k]["sha256"]]
+              lines.append(f"sha256 mismatches: {diff or 'none (byte-identical)'}")
+          else:
+              lines.append("versions differ, so only file names were compared")
+          report = "\n".join(lines)
+          print(report)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("```\n" + report + "\n```\n")
+          sys.exit(1 if missing else 0)
+          PY
