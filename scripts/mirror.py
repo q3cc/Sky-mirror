@@ -200,37 +200,54 @@ def read_badging(apk: Path) -> dict[str, Any]:
     return {"packageName": match.group(1), "versionCode": int(match.group(2)), "versionName": match.group(3)}
 
 
-def signer_digests(apk: Path) -> set[str]:
+# Developer certificate lines, in both apksigner output styles:
+#   "Signer #1 certificate SHA-256 digest: <hex>"        (older apksigner)
+#   "V3.0 Signer: certificate SHA-256 digest: <hex>"     (newer, one line per scheme)
+# "Source Stamp Signer: ..." is Google Play's delivery stamp, not the developer.
+DEVELOPER_CERT_LINE = re.compile(
+    r"^(?:Signer #\d+|V\d+(?:\.\d+)? Signer):? certificate SHA-256 digest: ([0-9a-f]{64})$", re.M
+)
+SOURCE_STAMP_LINE = re.compile(r"^Source Stamp Signer:? certificate SHA-256 digest: ([0-9a-f]{64})$", re.M)
+
+
+def signer_digests(apk: Path) -> tuple[frozenset[str], str | None]:
+    """Return (developer certificate digests, Google Play source stamp digest or None)."""
     result = run_tool(
         [find_android_tool("apksigner", "APKSIGNER"), "verify", "--print-certs", str(apk)], timeout=600
     )
-    # Only "Signer #N" lines are the developer's certificates. Play-delivered APKs may also
-    # carry a "Source Stamp Signer" line (Google Play's own stamp), which is not a signer.
-    digests = set(re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-f]{64})$", result.stdout, re.M))
+    digests = frozenset(DEVELOPER_CERT_LINE.findall(result.stdout))
     if result.returncode != 0 or not digests:
         raise SourceError(f"apksigner rejected {apk.name}: {tail(result.stderr or result.stdout)}")
-    return digests
+    stamp = SOURCE_STAMP_LINE.search(result.stdout)
+    return digests, stamp.group(1) if stamp else None
 
 
-def verify_signatures(files: list[Path], expected: str | None) -> str:
-    """Every APK must be signed by the same single certificate (and match the pin, if set)."""
+def verify_signatures(files: list[Path], expected: str | None) -> dict[str, Any]:
+    """Every APK must carry the same developer certificate(s), including the pin if set.
+
+    More than one certificate is allowed (v3.1 key rotation) as long as every file agrees.
+    """
     apks = [path for path in files if path.suffix.lower() == ".apk"]
     if not apks:
         raise SourceError("no APK files to verify")
-    signer: str | None = None
+    signers: frozenset[str] | None = None
+    stamps: set[str] = set()
     for apk in apks:
-        digests = signer_digests(apk)
-        if len(digests) != 1:
-            raise SourceError(f"{apk.name} has {len(digests)} signers; expected exactly one")
-        (digest,) = digests
-        if signer is None:
-            signer = digest
-        elif digest != signer:
-            raise SourceError(f"{apk.name} is signed by {digest}, other files by {signer}")
-    assert signer is not None
-    if expected and signer != expected.lower():
-        raise SourceError(f"signing certificate {signer} does not match app.signingCertSha256 {expected.lower()}")
-    return signer
+        digests, stamp = signer_digests(apk)
+        if stamp:
+            stamps.add(stamp)
+        if signers is None:
+            signers = digests
+        elif digests != signers:
+            raise SourceError(
+                f"{apk.name} is signed by {sorted(digests)}, other files by {sorted(signers)}"
+            )
+    assert signers is not None
+    if expected and expected.lower() not in signers:
+        raise SourceError(
+            f"signing certificates {sorted(signers)} do not include app.signingCertSha256 {expected.lower()}"
+        )
+    return {"signers": sorted(signers), "sourceStamps": sorted(stamps)}
 
 
 def package_files(directory: Path) -> list[Path]:
@@ -553,7 +570,8 @@ def command_download(args: argparse.Namespace) -> int:
             files = package_files(args.output_dir)
             if not files:
                 raise SourceError(f"{source} produced no package files")
-            signer = verify_signatures(files, expected_cert)
+            signature = verify_signatures(files, expected_cert)
+            signer = ", ".join(signature["signers"])
         except SourceError as exc:
             failures.append(f"{source}: {exc}")
             warn(f"download via {source} failed: {exc}")
@@ -564,6 +582,7 @@ def command_download(args: argparse.Namespace) -> int:
             "playDigestsChecked": CHECKS_PLAY_DIGESTS[source],
             "signingCertSha256": signer,
             "signingCertPinned": bool(expected_cert),
+            "playSourceStamps": signature["sourceStamps"],
             "failedSources": failures,
             "probeVersionCode": probe["app"]["versionCode"],
         }
@@ -714,6 +733,8 @@ def build_release_notes(manifest: dict[str, Any], repository: str) -> str:
         verification_lines.append(f"`{downloader_name}` 已按 Google Play 交付清单中的 SHA-256 校验每个文件。")
     if signer:
         verification_lines.append("所有 APK 均通过 `apksigner` 校验，且由同一个开发者证书签名。")
+    if verification.get("playSourceStamps"):
+        verification_lines.append("APK 带有 Google Play 的来源印章（Source Stamp），表明由 Google Play 交付。")
     lines = [
         "# Sky Android 镜像更新",
         "",
@@ -888,6 +909,7 @@ def command_finalize(args: argparse.Namespace) -> int:
         ),
         "signingCertSha256": meta.get("signingCertSha256"),
         "signingCertPinned": bool(meta.get("signingCertPinned", False)),
+        "playSourceStamps": meta.get("playSourceStamps", []),
     }
     write_json(args.output_dir / "release-manifest.json", manifest)
 

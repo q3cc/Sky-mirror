@@ -158,6 +158,23 @@ class MirrorTests(unittest.TestCase):
             self.assertTrue((output_dir / "rebuild-zip.ps1").is_file())
             self.assertTrue((output_dir / "rebuild-zip.sh").is_file())
 
+    def test_apksigner_output_parsing_skips_source_stamp(self) -> None:
+        # Shape taken from apksigner on the GitHub runner for a Play-delivered split.
+        sample = "\n".join([
+            "V3.0 Signer: certificate DN: CN=Developer",
+            "V3.0 Signer: certificate SHA-256 digest: " + "1" * 64,
+            "V3.0 Signer: certificate MD5 digest: 222a267745522b67be7ef9c9045b578b",
+            "Signer #1 certificate SHA-256 digest: " + "1" * 64,
+            "Source Stamp Signer: certificate DN: CN=Android, OU=Android, O=Google Inc.",
+            "Source Stamp Signer: certificate SHA-256 digest: "
+            "3257d599a49d2c961a471ca9843f59d341a405884583fc087df4237b733bbd6d",
+        ])
+        self.assertEqual(set(mirror.DEVELOPER_CERT_LINE.findall(sample)), {"1" * 64})
+        self.assertEqual(
+            mirror.SOURCE_STAMP_LINE.findall(sample),
+            ["3257d599a49d2c961a471ca9843f59d341a405884583fc087df4237b733bbd6d"],
+        )
+
     def test_finalize_rejects_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -234,10 +251,15 @@ import sys
 from pathlib import Path
 data = Path(sys.argv[-1]).read_bytes()
 digest = ("b" if data.startswith(b"evil") else "a") * 64
-print(f"Signer #1 certificate DN: CN=test")
-print(f"Signer #1 certificate SHA-256 digest: {digest}")
-print("Source Stamp Signer certificate DN: CN=Google Play")
-print(f"Source Stamp Signer certificate SHA-256 digest: {'c' * 64}")
+# Mimics newer apksigner: one line per scheme plus Google Play's source stamp.
+print("Verifies")
+print("V3.0 Signer: certificate DN: CN=test")
+print(f"V3.0 Signer: certificate SHA-256 digest: {digest}")
+print(f"V3.0 Signer: certificate MD5 digest: {'d' * 32}")
+if Path(sys.argv[-1]).name.endswith("-77.apk"):
+    print(f"Signer #1 certificate SHA-256 digest: {digest}")  # older style line, same cert
+print("Source Stamp Signer: certificate DN: CN=Android, O=Google Inc.")
+print(f"Source Stamp Signer: certificate SHA-256 digest: {'c' * 64}")
 '''
 
 FAKE_GPLAYDL = r'''#!/usr/bin/env python3
@@ -328,6 +350,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(meta["failedSources"], [])
         self.assertFalse(meta["playDigestsChecked"])
         self.assertEqual(meta["signingCertSha256"], GOOD_CERT)
+        self.assertEqual(meta["playSourceStamps"], ["c" * 64])
         self.assertEqual(
             names,
             [f"{PACKAGE}-77-config.arm64_v8a.apk", f"{PACKAGE}-77-initial.apk", f"{PACKAGE}-77.apk"],
