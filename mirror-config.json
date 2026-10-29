@@ -3,14 +3,19 @@
   "app": {
     "title": "Sky: Children of the Light",
     "packageName": "com.tgc.sky.android",
-    "playUrl": "https://play.google.com/store/apps/details?id=com.tgc.sky.android"
+    "playUrl": "https://play.google.com/store/apps/details?id=com.tgc.sky.android",
+    "signingCertSha256": "1053e223d9f921900d3d3d907413cceed42c4a210e409690a994030ae8d2b573"
   },
   "download": {
     "architecture": "arm64",
     "locales": [],
     "includeSplits": true,
     "includeExtras": true,
-    "includeDexMetadata": false
+    "includeDexMetadata": false,
+    "sources": [
+      "apkeep",
+      "gplaydl"
+    ]
   },
   "release": {
     "tagPrefix": "sky-android",

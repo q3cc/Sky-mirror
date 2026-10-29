@@ -168,7 +168,7 @@ $config.api_key
 | 配置 | 当前值 | 用途 |
 |---|---|---|
 | `app.packageName` | `com.tgc.sky.android` | Google Play 包名 |
-| `app.signingCertSha256` | Sky 的签名证书指纹 | 所有 APK 必须由这个证书签名 |
+| `app.signingCertSha256` | `1053e223…b573` | 所有 APK 必须由这个开发者证书签名 |
 | `download.sources` | `["apkeep", "gplaydl"]` | 下载通道及尝试顺序 |
 | `download.architecture` | `arm64` | 下载架构（apkeep 通道只支持 `arm64`） |
 | `download.locales` | `[]` | 需要额外下载的语言 split |
